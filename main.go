@@ -97,6 +97,14 @@ func main() {
 	log.SetPrefix("openviking-mcp: ")
 
 	cfg := LoadConfig()
+
+	// CLI mode: if args are provided, run as a command-line tool
+	if len(os.Args) > 1 {
+		runCLI(cfg, os.Args[1:])
+		return
+	}
+
+	// MCP mode: no args, run as stdio MCP server
 	s := &server{cfg: cfg}
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -121,6 +129,184 @@ func main() {
 
 		out, _ := json.Marshal(resp)
 		fmt.Fprintf(os.Stdout, "%s\n", out)
+	}
+}
+
+func runCLI(cfg Config, args []string) {
+	cmd := args[0]
+	switch cmd {
+	case "index":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Usage: openviking-mcp index <path>\n")
+			os.Exit(1)
+		}
+		cliIndex(cfg, args[1])
+	case "status":
+		cliStatus(cfg)
+	case "search":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Usage: openviking-mcp search <query>\n")
+			os.Exit(1)
+		}
+		cliSearch(cfg, args[1])
+	case "help", "--help", "-h":
+		fmt.Println("openviking-mcp — local semantic code search")
+		fmt.Println()
+		fmt.Println("CLI usage:")
+		fmt.Println("  openviking-mcp index <path>     Index a directory")
+		fmt.Println("  openviking-mcp status            Show index stats")
+		fmt.Println("  openviking-mcp search <query>    Search indexed files")
+		fmt.Println()
+		fmt.Println("MCP usage (no args):")
+		fmt.Println("  claude mcp add openviking /path/to/openviking-mcp")
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\nRun: openviking-mcp help\n", cmd)
+		os.Exit(1)
+	}
+}
+
+func cliIndex(cfg Config, path string) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid path: %v\n", err)
+		os.Exit(1)
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Path does not exist: %s\n", absPath)
+		os.Exit(1)
+	}
+	if !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "Not a directory: %s\n", absPath)
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	client := openviking.NewOllamaClient(cfg.OllamaEndpoint)
+	fmt.Printf("Connecting to Ollama at %s...\n", cfg.OllamaEndpoint)
+	if err := client.Ping(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Ollama not reachable: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Ollama: connected")
+
+	dbDir := filepath.Join(absPath, ".viking_db")
+	store, err := openviking.OpenStore(dbDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Store error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	embedder := openviking.NewOllamaEmbedder(client, cfg.Model)
+	indexer := openviking.NewIndexer(absPath, embedder, store, openviking.ChunkerOpts{
+		MaxChunkSize: 1500,
+		ContextDepth: cfg.ContextDepth,
+		ExcludeGlobs: cfg.ExcludePatterns,
+	})
+
+	fmt.Printf("Indexing %s...\n", absPath)
+	progressCh := make(chan openviking.IndexProgress, 64)
+	indexer.IndexProjectAsync(ctx, progressCh)
+
+	for p := range progressCh {
+		if p.Done {
+			if p.Err != nil {
+				fmt.Fprintf(os.Stderr, "\nIndexing failed: %v\n", p.Err)
+				os.Exit(1)
+			}
+			r := p.Result
+			fmt.Printf("\nDone. Scanned %d files, indexed %d, created %d chunks (%v)\n",
+				r.FilesScanned, r.FilesIndexed, r.ChunksCreated, r.Duration.Round(time.Millisecond))
+			fmt.Printf("Database: %s\n", dbDir)
+			return
+		}
+		fmt.Printf("\r  %d/%d files — %s", p.Current, p.Total, p.FilePath)
+	}
+}
+
+func cliStatus(cfg Config) {
+	ctx := context.Background()
+	client := openviking.NewOllamaClient(cfg.OllamaEndpoint)
+
+	fmt.Printf("Ollama: %s\n", cfg.OllamaEndpoint)
+	if err := client.Ping(ctx); err != nil {
+		fmt.Println("  Status: offline")
+	} else {
+		fmt.Println("  Status: running")
+		models, err := client.ListModels(ctx)
+		if err == nil {
+			hasModel := false
+			for _, m := range models {
+				if m.Name == cfg.Model || (len(m.Name) > len(cfg.Model) && m.Name[:len(cfg.Model)] == cfg.Model) {
+					hasModel = true
+					break
+				}
+			}
+			if hasModel {
+				fmt.Printf("  Model: %s (available)\n", cfg.Model)
+			} else {
+				fmt.Printf("  Model: %s (not pulled)\n", cfg.Model)
+			}
+		}
+	}
+
+	cwd, _ := os.Getwd()
+	dbDir := filepath.Join(cwd, ".viking_db")
+	if _, err := os.Stat(dbDir); err == nil {
+		store, err := openviking.OpenStore(dbDir)
+		if err == nil {
+			defer store.Close()
+			stats := store.Stats()
+			fmt.Printf("\nIndex: %s\n", dbDir)
+			fmt.Printf("  Files: %d\n", stats.TotalFiles)
+			fmt.Printf("  Chunks: %d\n", stats.TotalRecords)
+			if stats.LastModified > 0 {
+				fmt.Printf("  Last indexed: %s\n", time.Unix(stats.LastModified, 0).Format("2006-01-02 15:04:05"))
+			}
+		}
+	} else {
+		fmt.Println("\nNo index found in current directory.")
+	}
+}
+
+func cliSearch(cfg Config, query string) {
+	ctx := context.Background()
+	client := openviking.NewOllamaClient(cfg.OllamaEndpoint)
+	if err := client.Ping(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Ollama not reachable: %v\n", err)
+		os.Exit(1)
+	}
+
+	cwd, _ := os.Getwd()
+	dbDir := filepath.Join(cwd, ".viking_db")
+	store, err := openviking.OpenStore(dbDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Store error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	embedder := openviking.NewOllamaEmbedder(client, cfg.Model)
+	retriever := openviking.NewRetriever(embedder, store, 5, cfg.MaxContextTokens)
+
+	blocks, err := retriever.Retrieve(ctx, query)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Search error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(blocks) == 0 {
+		fmt.Println("No results found.")
+		return
+	}
+
+	for i, b := range blocks {
+		fmt.Printf("\n--- %s (L%d-%d, score: %.2f) ---\n", b.FilePath, b.StartLine, b.EndLine, b.Score)
+		fmt.Println(b.Content)
+		if i < len(blocks)-1 {
+			fmt.Println()
+		}
 	}
 }
 
