@@ -226,27 +226,51 @@ func cliIndex(cfg Config, path string, dbPath string) {
 
 	startTime := time.Now()
 	fmt.Printf("Indexing %s...\n", absPath)
-	fmt.Printf("Started: %s\n", startTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("Started:  %s\n", startTime.Format("2006-01-02 15:04:05"))
 	fmt.Printf("Database: %s\n\n", dbDir)
 
-	// Use incremental indexing — skips files already indexed with same modtime.
+	// Use async with progress so we get live updates.
+	// Incremental: skips files already indexed with same modtime.
 	// If you stop and restart, it picks up where it left off.
-	result, err := indexer.IndexIncremental(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nIndexing failed: %v\n", err)
-		os.Exit(1)
-	}
+	progressCh := make(chan openviking.IndexProgress, 64)
+	indexer.IndexProjectAsync(ctx, progressCh)
 
-	elapsed := time.Since(startTime).Round(time.Second)
-	fmt.Printf("\nDone.\n")
-	fmt.Printf("  Started:  %s\n", startTime.Format("2006-01-02 15:04:05"))
-	fmt.Printf("  Finished: %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Printf("  Elapsed:  %s\n", elapsed)
-	fmt.Printf("  Scanned:  %d files\n", result.FilesScanned)
-	fmt.Printf("  Indexed:  %d files\n", result.FilesIndexed)
-	fmt.Printf("  Skipped:  %d files (unchanged)\n", result.FilesSkipped)
-	fmt.Printf("  Chunks:   %d\n", result.ChunksCreated)
-	fmt.Printf("  Database: %s\n", dbDir)
+	lastPrint := time.Now()
+	for p := range progressCh {
+		if p.Done {
+			if p.Err != nil {
+				fmt.Fprintf(os.Stderr, "\nIndexing failed: %v\n", p.Err)
+				os.Exit(1)
+			}
+			r := p.Result
+			elapsed := time.Since(startTime).Round(time.Second)
+			fmt.Printf("\n\nDone.\n")
+			fmt.Printf("  Started:  %s\n", startTime.Format("2006-01-02 15:04:05"))
+			fmt.Printf("  Finished: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+			fmt.Printf("  Elapsed:  %s\n", elapsed)
+			fmt.Printf("  Scanned:  %d files\n", r.FilesScanned)
+			fmt.Printf("  Indexed:  %d files\n", r.FilesIndexed)
+			fmt.Printf("  Skipped:  %d files (unchanged)\n", r.FilesSkipped)
+			fmt.Printf("  Chunks:   %d\n", r.ChunksCreated)
+			fmt.Printf("  Database: %s\n", dbDir)
+			return
+		}
+		// Live progress with elapsed time and ETA
+		now := time.Now()
+		if now.Sub(lastPrint) > 500*time.Millisecond || p.Current == p.Total {
+			elapsed := now.Sub(startTime).Round(time.Second)
+			eta := ""
+			if p.Current > 0 {
+				perFile := now.Sub(startTime) / time.Duration(p.Current)
+				remaining := perFile * time.Duration(p.Total-p.Current)
+				eta = fmt.Sprintf(" | ETA: %s", remaining.Round(time.Second))
+			}
+			fmt.Printf("\r  [%s] %d/%d files%s — %s", elapsed, p.Current, p.Total, eta, p.FilePath)
+			// Clear rest of line in case previous filename was longer
+			fmt.Printf("\033[K")
+			lastPrint = now
+		}
+	}
 }
 
 func cliStatus(cfg Config, dbPath string) {
