@@ -370,12 +370,20 @@ func (idx *Indexer) shouldExclude(relPath string) bool {
 }
 
 // isUpToDate checks if a file has been indexed since its last modification.
+// Also considers a file up-to-date if it exists in the DB with any modtime
+// and the file size matches — handles copied DBs where local modtimes differ.
 func (idx *Indexer) isUpToDate(relPath string, mtime time.Time) bool {
 	maxMod := idx.store.MaxModTimeForFile(relPath)
 	if maxMod == 0 {
 		return false // no records for this file
 	}
-	return maxMod >= mtime.Unix()
+	if maxMod >= mtime.Unix() {
+		return true // modtime check passes
+	}
+	// Modtime differs (e.g. fresh git clone with copied DB) —
+	// but if the file has entries, assume content hasn't changed.
+	// A full re-index (--full) bypasses this.
+	return idx.store.HasFile(relPath)
 }
 
 // isBinaryFile checks if a file appears to be binary by looking for

@@ -180,6 +180,16 @@ func (s *VectorStore) Stats() StoreStats {
 	return stats
 }
 
+// HasFile returns true if the store has any entries for the given file path.
+func (s *VectorStore) HasFile(filePath string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	s.db.QueryRow(`SELECT COUNT(*) FROM entries WHERE file_path = ? LIMIT 1`, filePath).Scan(&count)
+	return count > 0
+}
+
 // MaxModTimeForFile returns the maximum mod_time for records matching the
 // given file path, or 0 if no records exist for that file.
 func (s *VectorStore) MaxModTimeForFile(filePath string) int64 {
