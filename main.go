@@ -236,15 +236,6 @@ func cliIndex(cfg Config, path string, dbPath string) {
 	indexer.IndexProjectAsync(ctx, progressCh)
 
 	lastPrint := time.Now()
-	// Track recent chunk processing times for a weighted ETA
-	type sample struct {
-		chunks int
-		dur    time.Duration
-	}
-	var samples []sample
-	lastChunks := 0
-	lastSampleTime := startTime
-
 	for p := range progressCh {
 		if p.Done {
 			if p.Err != nil {
@@ -265,44 +256,25 @@ func cliIndex(cfg Config, path string, dbPath string) {
 			return
 		}
 
-		// Track chunk rate from recent files for better ETA
 		now := time.Now()
-		newChunks := p.ChunksSoFar - lastChunks
-		if newChunks > 0 {
-			samples = append(samples, sample{chunks: newChunks, dur: now.Sub(lastSampleTime)})
-			// Keep last 20 samples for a rolling average
-			if len(samples) > 20 {
-				samples = samples[len(samples)-20:]
-			}
-			lastChunks = p.ChunksSoFar
-			lastSampleTime = now
-		}
-
 		if now.Sub(lastPrint) > 500*time.Millisecond || p.Current == p.Total {
 			elapsed := now.Sub(startTime).Round(time.Second)
 			eta := ""
-			if p.ChunksSoFar > 0 && p.Current > 0 {
-				// Estimate remaining chunks based on avg chunks/file so far
-				avgChunksPerFile := float64(p.ChunksSoFar) / float64(p.Current)
-				remainingChunks := avgChunksPerFile * float64(p.Total-p.Current)
-
-				// Use rolling average of recent chunk processing speed
-				if len(samples) > 0 {
-					var totalChunks int
-					var totalDur time.Duration
-					for _, s := range samples {
-						totalChunks += s.chunks
-						totalDur += s.dur
-					}
-					if totalChunks > 0 {
-						perChunk := totalDur / time.Duration(totalChunks)
-						remaining := time.Duration(remainingChunks) * perChunk
-						eta = fmt.Sprintf(" | ETA: %s", remaining.Round(time.Second))
-					}
+			if p.BytesDone > 0 && p.BytesTotal > 0 {
+				// ETA based on bytes processed — accounts for file size differences
+				bytesPerSec := float64(p.BytesDone) / now.Sub(startTime).Seconds()
+				if bytesPerSec > 0 {
+					remainingBytes := p.BytesTotal - p.BytesDone
+					remainingSecs := float64(remainingBytes) / bytesPerSec
+					eta = fmt.Sprintf(" | ETA: %s", (time.Duration(remainingSecs) * time.Second).Round(time.Second))
 				}
 			}
-			fmt.Printf("\r  [%s] %d/%d files (%d chunks)%s — %s\033[K",
-				elapsed, p.Current, p.Total, p.ChunksSoFar, eta, p.FilePath)
+			pct := ""
+			if p.BytesTotal > 0 {
+				pct = fmt.Sprintf(" %d%%", p.BytesDone*100/p.BytesTotal)
+			}
+			fmt.Printf("\r  [%s] %d/%d files%s (%d chunks)%s — %s\033[K",
+				elapsed, p.Current, p.Total, pct, p.ChunksSoFar, eta, p.FilePath)
 			lastPrint = now
 		}
 	}

@@ -52,6 +52,8 @@ type IndexProgress struct {
 	FilePath     string // current file being indexed
 	ChunksSoFar  int    // total chunks created so far
 	FileChunks   int    // chunks created for this file
+	BytesDone    int64  // bytes processed so far
+	BytesTotal   int64  // total bytes to process
 	Done         bool   // true when indexing is complete
 	Result       *IndexResult // non-nil when Done is true
 	Err          error        // non-nil if indexing failed
@@ -163,7 +165,19 @@ func (idx *Indexer) indexFiles(ctx context.Context, incremental bool, progress c
 
 	result.FilesScanned = len(files)
 
+	// Calculate total bytes for progress reporting
+	fileSizes := make([]int64, len(files))
+	var totalBytes int64
+	for i, path := range files {
+		info, err := os.Stat(path)
+		if err == nil {
+			fileSizes[i] = info.Size()
+			totalBytes += info.Size()
+		}
+	}
+
 	// Phase 2: index each file
+	var bytesDone int64
 	for i, path := range files {
 		if ctx.Err() != nil {
 			result.Duration = time.Since(start)
@@ -172,15 +186,17 @@ func (idx *Indexer) indexFiles(ctx context.Context, incremental bool, progress c
 
 		relPath, _ := filepath.Rel(idx.root, path)
 
+		bytesDone += fileSizes[i]
+
 		// Incremental: skip unchanged files
 		if incremental {
 			info, statErr := os.Stat(path)
 			if statErr != nil {
-				// Send progress even for skipped
 				if progress != nil {
 					progress <- IndexProgress{
 						Current: i + 1, Total: len(files), FilePath: relPath,
 						ChunksSoFar: result.ChunksCreated,
+						BytesDone: bytesDone, BytesTotal: totalBytes,
 					}
 				}
 				continue
@@ -191,6 +207,7 @@ func (idx *Indexer) indexFiles(ctx context.Context, incremental bool, progress c
 					progress <- IndexProgress{
 						Current: i + 1, Total: len(files), FilePath: relPath,
 						ChunksSoFar: result.ChunksCreated,
+						BytesDone: bytesDone, BytesTotal: totalBytes,
 					}
 				}
 				continue
@@ -202,6 +219,7 @@ func (idx *Indexer) indexFiles(ctx context.Context, incremental bool, progress c
 			progress <- IndexProgress{
 				Current: i + 1, Total: len(files), FilePath: relPath,
 				ChunksSoFar: result.ChunksCreated,
+				BytesDone: bytesDone, BytesTotal: totalBytes,
 			}
 		}
 
