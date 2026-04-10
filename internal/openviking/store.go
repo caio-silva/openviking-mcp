@@ -14,15 +14,16 @@ import (
 
 // VectorRecord is a single indexed chunk with its embedding.
 type VectorRecord struct {
-	ID         string    `json:"id"`
-	FilePath   string    `json:"filePath"`
-	StartLine  int       `json:"startLine"`
-	EndLine    int       `json:"endLine"`
-	Content    string    `json:"content"`
-	Kind       string    `json:"kind"`
-	Identifier string    `json:"identifier"`
-	Embedding  []float32 `json:"embedding"`
-	ModTime    int64     `json:"modTime"`
+	ID          string    `json:"id"`
+	FilePath    string    `json:"filePath"`
+	StartLine   int       `json:"startLine"`
+	EndLine     int       `json:"endLine"`
+	Content     string    `json:"content"`
+	Kind        string    `json:"kind"`
+	Identifier  string    `json:"identifier"`
+	Embedding   []float32 `json:"embedding"`
+	ModTime     int64     `json:"modTime"`
+	ContentHash string    `json:"contentHash"`
 }
 
 // SearchResult is a record with its similarity score.
@@ -68,13 +69,17 @@ func OpenStore(dbDir string) (*VectorStore, error) {
 			kind TEXT,
 			identifier TEXT,
 			vector BLOB NOT NULL,
-			mod_time INTEGER NOT NULL
+			mod_time INTEGER NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT ''
 		);
 		CREATE INDEX IF NOT EXISTS idx_file_path ON entries(file_path);
 	`); err != nil {
 		db.Close()
 		return nil, err
 	}
+
+	// Migrate: add content_hash column if missing (existing DBs).
+	db.Exec(`ALTER TABLE entries ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`)
 
 	return &VectorStore{db: db}, nil
 }
@@ -134,8 +139,8 @@ func (s *VectorStore) Upsert(records []VectorRecord) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT OR REPLACE INTO entries (id, file_path, start_line, end_line, content, kind, identifier, vector, mod_time)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO entries (id, file_path, start_line, end_line, content, kind, identifier, vector, mod_time, content_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -144,7 +149,7 @@ func (s *VectorStore) Upsert(records []VectorRecord) error {
 
 	for _, r := range records {
 		vecBlob := encodeFloat32Vec(r.Embedding)
-		if _, err := stmt.Exec(r.ID, r.FilePath, r.StartLine, r.EndLine, r.Content, r.Kind, r.Identifier, vecBlob, r.ModTime); err != nil {
+		if _, err := stmt.Exec(r.ID, r.FilePath, r.StartLine, r.EndLine, r.Content, r.Kind, r.Identifier, vecBlob, r.ModTime, r.ContentHash); err != nil {
 			return err
 		}
 	}
@@ -188,6 +193,17 @@ func (s *VectorStore) HasFile(filePath string) bool {
 	var count int
 	s.db.QueryRow(`SELECT COUNT(*) FROM entries WHERE file_path = ? LIMIT 1`, filePath).Scan(&count)
 	return count > 0
+}
+
+// ContentHashForFile returns the content_hash stored for a file, or "" if
+// no records exist or the hash was never populated.
+func (s *VectorStore) ContentHashForFile(filePath string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var hash string
+	s.db.QueryRow(`SELECT content_hash FROM entries WHERE file_path = ? AND content_hash != '' LIMIT 1`, filePath).Scan(&hash)
+	return hash
 }
 
 // MaxModTimeForFile returns the maximum mod_time for records matching the

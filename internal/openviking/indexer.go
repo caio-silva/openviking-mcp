@@ -2,6 +2,8 @@ package openviking
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -201,7 +203,7 @@ func (idx *Indexer) indexFiles(ctx context.Context, incremental bool, progress c
 				}
 				continue
 			}
-			if idx.isUpToDate(relPath, info.ModTime()) {
+			if idx.isUpToDate(relPath, info.ModTime(), path) {
 				result.FilesSkipped++
 				if progress != nil {
 					progress <- IndexProgress{
@@ -234,6 +236,7 @@ func (idx *Indexer) indexFiles(ctx context.Context, incremental bool, progress c
 		}
 
 		// Embed and upsert each chunk
+		fileHash := hashFile(path)
 		var records []VectorRecord
 		for ci, chunk := range chunks {
 			vec, embedErr := idx.embedder.Embed(ctx, chunk.Content)
@@ -249,15 +252,16 @@ func (idx *Indexer) indexFiles(ctx context.Context, incremental bool, progress c
 			}
 
 			records = append(records, VectorRecord{
-				ID:         fmt.Sprintf("%s:%d:%d", relPath, chunk.StartLine, chunk.EndLine),
-				FilePath:   relPath,
-				StartLine:  chunk.StartLine,
-				EndLine:    chunk.EndLine,
-				Content:    chunk.Content,
-				Kind:       chunk.Kind,
-				Identifier: chunk.Identifier,
-				Embedding:  vec,
-				ModTime:    mtime,
+				ID:          fmt.Sprintf("%s:%d:%d", relPath, chunk.StartLine, chunk.EndLine),
+				FilePath:    relPath,
+				StartLine:   chunk.StartLine,
+				EndLine:     chunk.EndLine,
+				Content:     chunk.Content,
+				Kind:        chunk.Kind,
+				Identifier:  chunk.Identifier,
+				Embedding:   vec,
+				ModTime:     mtime,
+				ContentHash: fileHash,
 			})
 		}
 
@@ -370,9 +374,9 @@ func (idx *Indexer) shouldExclude(relPath string) bool {
 }
 
 // isUpToDate checks if a file has been indexed since its last modification.
-// Also considers a file up-to-date if it exists in the DB with any modtime
-// and the file size matches — handles copied DBs where local modtimes differ.
-func (idx *Indexer) isUpToDate(relPath string, mtime time.Time) bool {
+// Uses a two-tier check: fast modtime comparison first, then content hash
+// fallback for copied DBs where local modtimes differ (e.g. fresh git clone).
+func (idx *Indexer) isUpToDate(relPath string, mtime time.Time, filePath string) bool {
 	maxMod := idx.store.MaxModTimeForFile(relPath)
 	if maxMod == 0 {
 		return false // no records for this file
@@ -380,10 +384,24 @@ func (idx *Indexer) isUpToDate(relPath string, mtime time.Time) bool {
 	if maxMod >= mtime.Unix() {
 		return true // modtime check passes
 	}
-	// Modtime differs (e.g. fresh git clone with copied DB) —
-	// but if the file has entries, assume content hasn't changed.
-	// A full re-index (--full) bypasses this.
-	return idx.store.HasFile(relPath)
+	// Modtime differs — compare content hash to detect actual changes.
+	storedHash := idx.store.ContentHashForFile(relPath)
+	if storedHash == "" {
+		// DB predates content hashing — fall back to HasFile.
+		return idx.store.HasFile(relPath)
+	}
+	currentHash := hashFile(filePath)
+	return currentHash == storedHash
+}
+
+// hashFile returns the hex-encoded SHA-256 of the file contents.
+func hashFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }
 
 // isBinaryFile checks if a file appears to be binary by looking for
