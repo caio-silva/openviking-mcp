@@ -47,12 +47,14 @@ type IndexResult struct {
 
 // IndexProgress reports progress from an async indexing run.
 type IndexProgress struct {
-	Current  int    // files processed so far
-	Total    int    // total files discovered
-	FilePath string // current file being indexed
-	Done     bool   // true when indexing is complete
-	Result   *IndexResult // non-nil when Done is true
-	Err      error        // non-nil if indexing failed
+	Current      int    // files processed so far
+	Total        int    // total files discovered
+	FilePath     string // current file being indexed
+	ChunksSoFar  int    // total chunks created so far
+	FileChunks   int    // chunks created for this file
+	Done         bool   // true when indexing is complete
+	Result       *IndexResult // non-nil when Done is true
+	Err          error        // non-nil if indexing failed
 }
 
 // IndexAll performs a full re-index of the project synchronously.
@@ -170,24 +172,36 @@ func (idx *Indexer) indexFiles(ctx context.Context, incremental bool, progress c
 
 		relPath, _ := filepath.Rel(idx.root, path)
 
-		// Send progress update
-		if progress != nil {
-			progress <- IndexProgress{
-				Current:  i + 1,
-				Total:    len(files),
-				FilePath: relPath,
-			}
-		}
-
 		// Incremental: skip unchanged files
 		if incremental {
 			info, statErr := os.Stat(path)
 			if statErr != nil {
+				// Send progress even for skipped
+				if progress != nil {
+					progress <- IndexProgress{
+						Current: i + 1, Total: len(files), FilePath: relPath,
+						ChunksSoFar: result.ChunksCreated,
+					}
+				}
 				continue
 			}
 			if idx.isUpToDate(relPath, info.ModTime()) {
 				result.FilesSkipped++
+				if progress != nil {
+					progress <- IndexProgress{
+						Current: i + 1, Total: len(files), FilePath: relPath,
+						ChunksSoFar: result.ChunksCreated,
+					}
+				}
 				continue
+			}
+		}
+
+		// Send progress update before processing
+		if progress != nil {
+			progress <- IndexProgress{
+				Current: i + 1, Total: len(files), FilePath: relPath,
+				ChunksSoFar: result.ChunksCreated,
 			}
 		}
 

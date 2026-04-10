@@ -236,6 +236,15 @@ func cliIndex(cfg Config, path string, dbPath string) {
 	indexer.IndexProjectAsync(ctx, progressCh)
 
 	lastPrint := time.Now()
+	// Track recent chunk processing times for a weighted ETA
+	type sample struct {
+		chunks int
+		dur    time.Duration
+	}
+	var samples []sample
+	lastChunks := 0
+	lastSampleTime := startTime
+
 	for p := range progressCh {
 		if p.Done {
 			if p.Err != nil {
@@ -255,19 +264,45 @@ func cliIndex(cfg Config, path string, dbPath string) {
 			fmt.Printf("  Database: %s\n", dbDir)
 			return
 		}
-		// Live progress with elapsed time and ETA
+
+		// Track chunk rate from recent files for better ETA
 		now := time.Now()
+		newChunks := p.ChunksSoFar - lastChunks
+		if newChunks > 0 {
+			samples = append(samples, sample{chunks: newChunks, dur: now.Sub(lastSampleTime)})
+			// Keep last 20 samples for a rolling average
+			if len(samples) > 20 {
+				samples = samples[len(samples)-20:]
+			}
+			lastChunks = p.ChunksSoFar
+			lastSampleTime = now
+		}
+
 		if now.Sub(lastPrint) > 500*time.Millisecond || p.Current == p.Total {
 			elapsed := now.Sub(startTime).Round(time.Second)
 			eta := ""
-			if p.Current > 0 {
-				perFile := now.Sub(startTime) / time.Duration(p.Current)
-				remaining := perFile * time.Duration(p.Total-p.Current)
-				eta = fmt.Sprintf(" | ETA: %s", remaining.Round(time.Second))
+			if p.ChunksSoFar > 0 && p.Current > 0 {
+				// Estimate remaining chunks based on avg chunks/file so far
+				avgChunksPerFile := float64(p.ChunksSoFar) / float64(p.Current)
+				remainingChunks := avgChunksPerFile * float64(p.Total-p.Current)
+
+				// Use rolling average of recent chunk processing speed
+				if len(samples) > 0 {
+					var totalChunks int
+					var totalDur time.Duration
+					for _, s := range samples {
+						totalChunks += s.chunks
+						totalDur += s.dur
+					}
+					if totalChunks > 0 {
+						perChunk := totalDur / time.Duration(totalChunks)
+						remaining := time.Duration(remainingChunks) * perChunk
+						eta = fmt.Sprintf(" | ETA: %s", remaining.Round(time.Second))
+					}
+				}
 			}
-			fmt.Printf("\r  [%s] %d/%d files%s — %s", elapsed, p.Current, p.Total, eta, p.FilePath)
-			// Clear rest of line in case previous filename was longer
-			fmt.Printf("\033[K")
+			fmt.Printf("\r  [%s] %d/%d files (%d chunks)%s — %s\033[K",
+				elapsed, p.Current, p.Total, p.ChunksSoFar, eta, p.FilePath)
 			lastPrint = now
 		}
 	}
