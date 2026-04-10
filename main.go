@@ -134,28 +134,44 @@ func main() {
 
 func runCLI(cfg Config, args []string) {
 	cmd := args[0]
+	// Parse --out flag from anywhere in args
+	outPath := ""
+	var cleanArgs []string
+	for i := 1; i < len(args); i++ {
+		if (args[i] == "--out" || args[i] == "-o") && i+1 < len(args) {
+			outPath = args[i+1]
+			i++
+		} else {
+			cleanArgs = append(cleanArgs, args[i])
+		}
+	}
+
 	switch cmd {
 	case "index":
-		if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "Usage: openviking-mcp index <path>\n")
+		if len(cleanArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "Usage: openviking-mcp index <path> [--out /path/to/output/dir]\n")
 			os.Exit(1)
 		}
-		cliIndex(cfg, args[1])
+		cliIndex(cfg, cleanArgs[0], outPath)
 	case "status":
-		cliStatus(cfg)
+		cliStatus(cfg, outPath)
 	case "search":
-		if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "Usage: openviking-mcp search <query>\n")
+		if len(cleanArgs) < 1 {
+			fmt.Fprintf(os.Stderr, "Usage: openviking-mcp search <query> [--out /path/to/db/dir]\n")
 			os.Exit(1)
 		}
-		cliSearch(cfg, args[1])
+		cliSearch(cfg, cleanArgs[0], outPath)
 	case "help", "--help", "-h":
 		fmt.Println("openviking-mcp — local semantic code search")
 		fmt.Println()
 		fmt.Println("CLI usage:")
-		fmt.Println("  openviking-mcp index <path>     Index a directory")
-		fmt.Println("  openviking-mcp status            Show index stats")
-		fmt.Println("  openviking-mcp search <query>    Search indexed files")
+		fmt.Println("  openviking-mcp index <path> [--out <dir>]   Index a directory")
+		fmt.Println("  openviking-mcp status [--out <dir>]         Show index stats")
+		fmt.Println("  openviking-mcp search <query> [--out <dir>] Search indexed files")
+		fmt.Println()
+		fmt.Println("Options:")
+		fmt.Println("  --out, -o <dir>  Where to store the database (default: <path>/.viking_db/)")
+		fmt.Println("                   The DB is a single file: <dir>/vectors.db")
 		fmt.Println()
 		fmt.Println("MCP usage (no args):")
 		fmt.Println("  claude mcp add openviking /path/to/openviking-mcp")
@@ -165,7 +181,7 @@ func runCLI(cfg Config, args []string) {
 	}
 }
 
-func cliIndex(cfg Config, path string) {
+func cliIndex(cfg Config, path string, dbPath string) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid path: %v\n", err)
@@ -190,7 +206,10 @@ func cliIndex(cfg Config, path string) {
 	}
 	fmt.Println("Ollama: connected")
 
-	dbDir := filepath.Join(absPath, ".viking_db")
+	dbDir := dbPath
+	if dbDir == "" {
+		dbDir = filepath.Join(absPath, ".viking_db")
+	}
 	store, err := openviking.OpenStore(dbDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Store error: %v\n", err)
@@ -225,7 +244,7 @@ func cliIndex(cfg Config, path string) {
 	}
 }
 
-func cliStatus(cfg Config) {
+func cliStatus(cfg Config, dbPath string) {
 	ctx := context.Background()
 	client := openviking.NewOllamaClient(cfg.OllamaEndpoint)
 
@@ -251,14 +270,17 @@ func cliStatus(cfg Config) {
 		}
 	}
 
-	cwd, _ := os.Getwd()
-	dbDir := filepath.Join(cwd, ".viking_db")
-	if _, err := os.Stat(dbDir); err == nil {
-		store, err := openviking.OpenStore(dbDir)
+	statusDbDir := dbPath
+	if statusDbDir == "" {
+		cwd, _ := os.Getwd()
+		statusDbDir = filepath.Join(cwd, ".viking_db")
+	}
+	if _, err := os.Stat(statusDbDir); err == nil {
+		store, err := openviking.OpenStore(statusDbDir)
 		if err == nil {
 			defer store.Close()
 			stats := store.Stats()
-			fmt.Printf("\nIndex: %s\n", dbDir)
+			fmt.Printf("\nIndex: %s\n", statusDbDir)
 			fmt.Printf("  Files: %d\n", stats.TotalFiles)
 			fmt.Printf("  Chunks: %d\n", stats.TotalRecords)
 			if stats.LastModified > 0 {
@@ -266,11 +288,11 @@ func cliStatus(cfg Config) {
 			}
 		}
 	} else {
-		fmt.Println("\nNo index found in current directory.")
+		fmt.Printf("\nNo index found at %s\n", statusDbDir)
 	}
 }
 
-func cliSearch(cfg Config, query string) {
+func cliSearch(cfg Config, query string, dbPath string) {
 	ctx := context.Background()
 	client := openviking.NewOllamaClient(cfg.OllamaEndpoint)
 	if err := client.Ping(ctx); err != nil {
@@ -278,9 +300,12 @@ func cliSearch(cfg Config, query string) {
 		os.Exit(1)
 	}
 
-	cwd, _ := os.Getwd()
-	dbDir := filepath.Join(cwd, ".viking_db")
-	store, err := openviking.OpenStore(dbDir)
+	searchDbDir := dbPath
+	if searchDbDir == "" {
+		cwd, _ := os.Getwd()
+		searchDbDir = filepath.Join(cwd, ".viking_db")
+	}
+	store, err := openviking.OpenStore(searchDbDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Store error: %v\n", err)
 		os.Exit(1)
