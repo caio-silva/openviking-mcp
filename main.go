@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/revprism-dev-bot/openviking-mcp/internal/openviking"
+	"github.com/caio-silva/openviking-mcp/internal/openviking"
 )
 
 // --- JSON-RPC / MCP types ---

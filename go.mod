@@ -1,4 +1,4 @@
-module github.com/revprism-dev-bot/openviking-mcp
+module github.com/caio-silva/openviking-mcp
 
 go 1.25.0
 

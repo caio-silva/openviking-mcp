@@ -27,13 +27,13 @@ An [MCP](https://modelcontextprotocol.io/) server that indexes your project file
 ### Install
 
 ```bash
-go install github.com/revprism-dev-bot/openviking-mcp@latest
+go install github.com/caio-silva/openviking-mcp@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/revprism-dev-bot/openviking-mcp.git
+git clone https://github.com/caio-silva/openviking-mcp.git
 cd openviking-mcp
 make build
 ```
