@@ -1,57 +1,33 @@
-package main
+// Package mcp implements the JSON-RPC based MCP server for OpenViking.
+package mcp
 
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/caio-silva/openviking-mcp/internal/config"
+	"github.com/caio-silva/openviking-mcp/internal/registry"
 )
 
-// --- JSON-RPC / MCP types ---
-
-type jsonRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id,omitempty"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
+// Server holds runtime state for the MCP server.
+type Server struct {
+	Cfg      config.Config
+	Registry *registry.Registry
+	Index    IndexState
 }
 
-type jsonRPCResponse struct {
-	JSONRPC string    `json:"jsonrpc"`
-	ID      any       `json:"id,omitempty"`
-	Result  any       `json:"result,omitempty"`
-	Error   *rpcError `json:"error,omitempty"`
+// TextResult creates a successful text result.
+func TextResult(text string) MCPToolResult {
+	return MCPToolResult{Content: []MCPContent{{Type: "text", Text: text}}}
 }
 
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+// ErrResult creates an error text result.
+func ErrResult(msg string) MCPToolResult {
+	return MCPToolResult{Content: []MCPContent{{Type: "text", Text: msg}}, IsError: true}
 }
 
-type mcpToolInfo struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-}
-
-type mcpToolResult struct {
-	Content []mcpContent `json:"content"`
-	IsError bool         `json:"isError,omitempty"`
-}
-
-type mcpContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-func textResult(text string) mcpToolResult {
-	return mcpToolResult{Content: []mcpContent{{Type: "text", Text: text}}}
-}
-
-func errResult(msg string) mcpToolResult {
-	return mcpToolResult{Content: []mcpContent{{Type: "text", Text: msg}}, IsError: true}
-}
-
-// handle dispatches a JSON-RPC request to the appropriate handler.
-func (s *server) handle(req jsonRPCRequest) *jsonRPCResponse {
+// Handle dispatches a JSON-RPC request to the appropriate handler.
+func (s *Server) Handle(req JSONRPCRequest) *JSONRPCResponse {
 	switch req.Method {
 	case "initialize":
 		return s.handleInitialize(req)
@@ -62,18 +38,18 @@ func (s *server) handle(req jsonRPCRequest) *jsonRPCResponse {
 	case "tools/call":
 		return s.handleToolsCall(req)
 	case "ping":
-		return &jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}}
+		return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}}
 	default:
-		return &jsonRPCResponse{
+		return &JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Error:   &rpcError{Code: -32601, Message: "method not found: " + req.Method},
+			Error:   &RPCError{Code: -32601, Message: "method not found: " + req.Method},
 		}
 	}
 }
 
-func (s *server) handleInitialize(req jsonRPCRequest) *jsonRPCResponse {
-	return &jsonRPCResponse{
+func (s *Server) handleInitialize(req JSONRPCRequest) *JSONRPCResponse {
+	return &JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result: map[string]any{
@@ -89,8 +65,8 @@ func (s *server) handleInitialize(req jsonRPCRequest) *jsonRPCResponse {
 	}
 }
 
-func (s *server) handleToolsList(req jsonRPCRequest) *jsonRPCResponse {
-	tools := []mcpToolInfo{
+func (s *Server) handleToolsList(req JSONRPCRequest) *JSONRPCResponse {
+	tools := []MCPToolInfo{
 		{
 			Name:        "search_context",
 			Description: "Search indexed project files for code relevant to a query. Uses local Ollama embeddings and a SQLite vector store.",
@@ -146,27 +122,27 @@ func (s *server) handleToolsList(req jsonRPCRequest) *jsonRPCResponse {
 		},
 	}
 
-	return &jsonRPCResponse{
+	return &JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result:  map[string]any{"tools": tools},
 	}
 }
 
-func (s *server) handleToolsCall(req jsonRPCRequest) *jsonRPCResponse {
+func (s *Server) handleToolsCall(req JSONRPCRequest) *JSONRPCResponse {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return &jsonRPCResponse{
+		return &JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Error:   &rpcError{Code: -32602, Message: "invalid params: " + err.Error()},
+			Error:   &RPCError{Code: -32602, Message: "invalid params: " + err.Error()},
 		}
 	}
 
-	var result mcpToolResult
+	var result MCPToolResult
 	switch params.Name {
 	case "search_context":
 		result = s.toolSearch(params.Arguments)
@@ -177,20 +153,20 @@ func (s *server) handleToolsCall(req jsonRPCRequest) *jsonRPCResponse {
 	case "list_projects":
 		result = s.toolListProjects()
 	default:
-		return &jsonRPCResponse{
+		return &JSONRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Error:   &rpcError{Code: -32602, Message: "unknown tool: " + params.Name},
+			Error:   &RPCError{Code: -32602, Message: "unknown tool: " + params.Name},
 		}
 	}
 
-	return &jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
+	return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
 }
 
-func (s *server) toolListProjects() mcpToolResult {
-	projects := s.registry.All()
+func (s *Server) toolListProjects() MCPToolResult {
+	projects := s.Registry.All()
 	if len(projects) == 0 {
-		return textResult("No projects registered. Index a project first with index_project.")
+		return TextResult("No projects registered. Index a project first with index_project.")
 	}
 
 	type projectInfo struct {
@@ -208,5 +184,5 @@ func (s *server) toolListProjects() mcpToolResult {
 	}
 
 	out, _ := json.MarshalIndent(list, "", "  ")
-	return textResult(fmt.Sprintf("Registered projects (%d):\n%s", len(list), string(out)))
+	return TextResult(fmt.Sprintf("Registered projects (%d):\n%s", len(list), string(out)))
 }

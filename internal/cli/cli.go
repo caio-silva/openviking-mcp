@@ -1,4 +1,5 @@
-package main
+// Package cli implements the command-line interface for openviking-mcp.
+package cli
 
 import (
 	"context"
@@ -7,10 +8,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/caio-silva/openviking-mcp/internal/config"
 	"github.com/caio-silva/openviking-mcp/internal/openviking"
+	"github.com/caio-silva/openviking-mcp/internal/registry"
 )
 
-func runCLI(cfg Config, args []string) {
+// RunCLI dispatches the CLI subcommand.
+func RunCLI(cfg config.Config, args []string) {
 	cmd := args[0]
 	// Parse --out flag from anywhere in args
 	outPath := ""
@@ -62,7 +66,7 @@ func runCLI(cfg Config, args []string) {
 	}
 }
 
-func cliIndex(cfg Config, path string, dbPath string) {
+func cliIndex(cfg config.Config, path string, dbPath string) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid path: %v\n", err)
@@ -137,7 +141,7 @@ func cliIndex(cfg Config, path string, dbPath string) {
 
 			// Register project in registry
 			name := filepath.Base(absPath)
-			reg := LoadRegistry()
+			reg := registry.LoadRegistry()
 			reg.Register(name, absPath, dbDir)
 			if err := reg.Save(); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to save project registry: %v\n", err)
@@ -169,7 +173,7 @@ func cliIndex(cfg Config, path string, dbPath string) {
 	}
 }
 
-func cliStatus(cfg Config, dbPath string) {
+func cliStatus(cfg config.Config, dbPath string) {
 	ctx := context.Background()
 	client := openviking.NewOllamaClient(cfg.OllamaEndpoint)
 
@@ -217,14 +221,14 @@ func cliStatus(cfg Config, dbPath string) {
 	}
 
 	// Show registered projects
-	reg := LoadRegistry()
+	reg := registry.LoadRegistry()
 	projects := reg.All()
 	if len(projects) > 0 {
 		fmt.Printf("\nRegistered projects:\n")
 		cwd, _ := os.Getwd()
 		for _, p := range projects {
 			marker := " "
-			if isSubpath(cwd, p.Path) {
+			if registry.IsSubpath(cwd, p.Path) {
 				marker = "*"
 			}
 			fmt.Printf("  %s %-20s %s\n", marker, p.Name, p.Path)
@@ -232,7 +236,7 @@ func cliStatus(cfg Config, dbPath string) {
 	}
 }
 
-func cliSearch(cfg Config, query string, dbPath string) {
+func cliSearch(cfg config.Config, query string, dbPath string) {
 	ctx := context.Background()
 	client := openviking.NewOllamaClient(cfg.OllamaEndpoint)
 	if err := client.Ping(ctx); err != nil {
@@ -276,7 +280,7 @@ func cliSearch(cfg Config, query string, dbPath string) {
 }
 
 func cliProjects() {
-	reg := LoadRegistry()
+	reg := registry.LoadRegistry()
 	projects := reg.All()
 	if len(projects) == 0 {
 		fmt.Println("No projects registered. Index a project first.")
@@ -287,7 +291,7 @@ func cliProjects() {
 	fmt.Printf("Registered projects (%d):\n\n", len(projects))
 	for _, p := range projects {
 		marker := " "
-		if isSubpath(cwd, p.Path) {
+		if registry.IsSubpath(cwd, p.Path) {
 			marker = "*"
 		}
 		fmt.Printf("  %s %s\n", marker, p.Name)

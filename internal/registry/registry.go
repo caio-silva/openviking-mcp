@@ -1,4 +1,4 @@
-package main
+package registry
 
 import (
 	"encoding/json"
@@ -105,7 +105,7 @@ func (r *Registry) FindByCWD(cwd string) *ProjectEntry {
 	var best *ProjectEntry
 	bestLen := 0
 	for i, p := range r.Projects {
-		if len(p.Path) > bestLen && isSubpath(cwd, p.Path) {
+		if len(p.Path) > bestLen && IsSubpath(cwd, p.Path) {
 			best = &r.Projects[i]
 			bestLen = len(p.Path)
 		}
@@ -122,7 +122,8 @@ func (r *Registry) All() []ProjectEntry {
 	return out
 }
 
-func isSubpath(child, parent string) bool {
+// IsSubpath reports whether child is under parent (or equal).
+func IsSubpath(child, parent string) bool {
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {
 		return false
