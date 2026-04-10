@@ -2,10 +2,16 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/caio-silva/openviking-mcp/internal/config"
+	"github.com/caio-silva/openviking-mcp/internal/openviking"
 	"github.com/caio-silva/openviking-mcp/internal/registry"
 )
 
@@ -113,6 +119,32 @@ func (s *Server) handleToolsList(req JSONRPCRequest) *JSONRPCResponse {
 			},
 		},
 		{
+			Name:        "index_text",
+			Description: "Index arbitrary text content for semantic search. Use this to store context from external sources (Jira tickets, Confluence pages, Slack messages, changelogs, etc.) so it can be found via search_context alongside code.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"content": map[string]any{
+						"type":        "string",
+						"description": "The text content to index",
+					},
+					"source": map[string]any{
+						"type":        "string",
+						"description": "Source identifier (e.g. JIRA-123, confluence:My Page, slack:#engineering)",
+					},
+					"url": map[string]any{
+						"type":        "string",
+						"description": "URL of the original source (optional — stored alongside content for reference)",
+					},
+					"project": map[string]any{
+						"type":        "string",
+						"description": "Project to store under (optional — uses CWD or auto-detects from registry)",
+					},
+				},
+				"required": []string{"content", "source"},
+			},
+		},
+		{
 			Name:        "list_projects",
 			Description: "List all projects registered in the OpenViking index registry. Shows project names, paths, and database locations.",
 			InputSchema: map[string]any{
@@ -150,6 +182,8 @@ func (s *Server) handleToolsCall(req JSONRPCRequest) *JSONRPCResponse {
 		result = s.toolIndex(params.Arguments)
 	case "openviking_status":
 		result = s.toolStatus()
+	case "index_text":
+		result = s.toolIndexText(params.Arguments)
 	case "list_projects":
 		result = s.toolListProjects()
 	default:
@@ -161,6 +195,165 @@ func (s *Server) handleToolsCall(req JSONRPCRequest) *JSONRPCResponse {
 	}
 
 	return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
+}
+
+func (s *Server) toolIndexText(args json.RawMessage) MCPToolResult {
+	var input indexTextInput
+	if err := json.Unmarshal(args, &input); err != nil {
+		return ErrResult("invalid arguments: " + err.Error())
+	}
+	if input.Content == "" {
+		return ErrResult("content is required")
+	}
+	if input.Source == "" {
+		return ErrResult("source is required")
+	}
+
+	ctx := context.Background()
+	client := openviking.NewOllamaClient(s.Cfg.OllamaEndpoint)
+	if err := client.Ping(ctx); err != nil {
+		return ErrResult("Ollama not reachable: " + err.Error())
+	}
+
+	// Resolve DB path — same logic as search
+	var dbDir string
+	if input.Project != "" {
+		if p := s.Registry.Find(input.Project); p != nil {
+			dbDir = p.DBPath
+		}
+	}
+	if dbDir == "" {
+		cwd, _ := os.Getwd()
+		if p := s.Registry.FindByCWD(cwd); p != nil {
+			dbDir = p.DBPath
+		} else {
+			dbDir = filepath.Join(cwd, ".viking_db")
+		}
+	}
+
+	store, err := openviking.OpenStore(dbDir)
+	if err != nil {
+		return ErrResult("store error: " + err.Error())
+	}
+	defer store.Close()
+
+	embedder := openviking.NewOllamaEmbedder(client, s.Cfg.Model)
+
+	// Prepend source metadata so it shows up in search results
+	content := input.Content
+	if input.URL != "" {
+		content = fmt.Sprintf("[Source: %s](%s)\n\n%s", input.Source, input.URL, content)
+	}
+
+	// Chunk the text
+	chunks := chunkText(content, input.Source, 1500)
+
+	var records []openviking.VectorRecord
+	for i, chunk := range chunks {
+		vec, err := embedder.Embed(ctx, chunk.Content)
+		if err != nil {
+			return ErrResult(fmt.Sprintf("embedding error on chunk %d: %v", i, err))
+		}
+		records = append(records, openviking.VectorRecord{
+			ID:          fmt.Sprintf("ext:%s:%d", input.Source, i),
+			FilePath:    input.Source,
+			StartLine:   chunk.Start,
+			EndLine:     chunk.End,
+			Content:     chunk.Content,
+			Kind:        "external",
+			Identifier:  input.Source,
+			Embedding:   vec,
+			ModTime:     time.Now().Unix(),
+			ContentHash: "",
+		})
+	}
+
+	if err := store.Upsert(records); err != nil {
+		return ErrResult("upsert error: " + err.Error())
+	}
+	if err := store.Save(); err != nil {
+		log.Printf("store save warning: %v", err)
+	}
+
+	out, _ := json.MarshalIndent(map[string]any{
+		"source":   input.Source,
+		"chunks":   len(records),
+		"database": dbDir,
+	}, "", "  ")
+	return TextResult(string(out))
+}
+
+// chunkText splits text into chunks for embedding.
+type textChunk struct {
+	Content string
+	Start   int
+	End     int
+}
+
+func chunkText(text, source string, maxSize int) []textChunk {
+	if len(text) <= maxSize {
+		return []textChunk{{Content: text, Start: 1, End: 1}}
+	}
+
+	// Split on double newlines first (paragraph boundaries)
+	paragraphs := splitParagraphs(text)
+	var chunks []textChunk
+	var buf string
+	chunkIdx := 0
+
+	for _, para := range paragraphs {
+		if len(buf)+len(para)+2 > maxSize && buf != "" {
+			chunkIdx++
+			chunks = append(chunks, textChunk{Content: buf, Start: chunkIdx, End: chunkIdx})
+			buf = ""
+		}
+		if buf != "" {
+			buf += "\n\n"
+		}
+		buf += para
+	}
+	if buf != "" {
+		chunkIdx++
+		chunks = append(chunks, textChunk{Content: buf, Start: chunkIdx, End: chunkIdx})
+	}
+
+	return chunks
+}
+
+func splitParagraphs(text string) []string {
+	var result []string
+	var current string
+	lines := splitLines(text)
+	for _, line := range lines {
+		if line == "" && current != "" {
+			result = append(result, current)
+			current = ""
+		} else {
+			if current != "" {
+				current += "\n"
+			}
+			current += line
+		}
+	}
+	if current != "" {
+		result = append(result, current)
+	}
+	return result
+}
+
+func splitLines(text string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			lines = append(lines, text[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(text) {
+		lines = append(lines, text[start:])
+	}
+	return lines
 }
 
 func (s *Server) toolListProjects() MCPToolResult {

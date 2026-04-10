@@ -64,6 +64,13 @@ type indexInput struct {
 	Path string `json:"path"`
 }
 
+type indexTextInput struct {
+	Content string `json:"content"` // the text to index
+	Source  string `json:"source"`  // identifier (e.g. "JIRA-123", "confluence:page-title", "slack:#channel")
+	URL     string `json:"url"`     // optional link to the original source
+	Project string `json:"project"` // which project to store it under (optional, uses CWD)
+}
+
 // --- Index state ---
 
 // IndexState tracks the state of a background indexing operation.
