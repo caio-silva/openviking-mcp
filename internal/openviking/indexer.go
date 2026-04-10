@@ -66,13 +66,14 @@ func (idx *Indexer) IndexIncremental(ctx context.Context) (*IndexResult, error) 
 	return idx.indexFiles(ctx, true, nil)
 }
 
-// IndexProjectAsync runs indexing in a goroutine, sending progress updates
-// on the provided channel. The channel is closed when indexing completes.
+// IndexProjectAsync runs incremental indexing in a goroutine, sending progress
+// updates on the provided channel. Skips files already indexed with the same
+// modtime. The channel is closed when indexing completes.
 // Respects context cancellation for early termination.
 func (idx *Indexer) IndexProjectAsync(ctx context.Context, progress chan<- IndexProgress) {
 	go func() {
 		defer close(progress)
-		result, err := idx.indexFiles(ctx, false, progress)
+		result, err := idx.indexFiles(ctx, true, progress)
 		progress <- IndexProgress{
 			Done:   true,
 			Result: result,
