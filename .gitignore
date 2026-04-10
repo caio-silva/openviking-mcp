@@ -1,4 +1,4 @@
-openviking-mcp
+/openviking-mcp
 .viking_db/
 *.log
 dist/
