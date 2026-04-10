@@ -224,24 +224,29 @@ func cliIndex(cfg Config, path string, dbPath string) {
 		ExcludeGlobs: cfg.ExcludePatterns,
 	})
 
+	startTime := time.Now()
 	fmt.Printf("Indexing %s...\n", absPath)
-	progressCh := make(chan openviking.IndexProgress, 64)
-	indexer.IndexProjectAsync(ctx, progressCh)
+	fmt.Printf("Started: %s\n", startTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("Database: %s\n\n", dbDir)
 
-	for p := range progressCh {
-		if p.Done {
-			if p.Err != nil {
-				fmt.Fprintf(os.Stderr, "\nIndexing failed: %v\n", p.Err)
-				os.Exit(1)
-			}
-			r := p.Result
-			fmt.Printf("\nDone. Scanned %d files, indexed %d, created %d chunks (%v)\n",
-				r.FilesScanned, r.FilesIndexed, r.ChunksCreated, r.Duration.Round(time.Millisecond))
-			fmt.Printf("Database: %s\n", dbDir)
-			return
-		}
-		fmt.Printf("\r  %d/%d files — %s", p.Current, p.Total, p.FilePath)
+	// Use incremental indexing — skips files already indexed with same modtime.
+	// If you stop and restart, it picks up where it left off.
+	result, err := indexer.IndexIncremental(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nIndexing failed: %v\n", err)
+		os.Exit(1)
 	}
+
+	elapsed := time.Since(startTime).Round(time.Second)
+	fmt.Printf("\nDone.\n")
+	fmt.Printf("  Started:  %s\n", startTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("  Finished: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Printf("  Elapsed:  %s\n", elapsed)
+	fmt.Printf("  Scanned:  %d files\n", result.FilesScanned)
+	fmt.Printf("  Indexed:  %d files\n", result.FilesIndexed)
+	fmt.Printf("  Skipped:  %d files (unchanged)\n", result.FilesSkipped)
+	fmt.Printf("  Chunks:   %d\n", result.ChunksCreated)
+	fmt.Printf("  Database: %s\n", dbDir)
 }
 
 func cliStatus(cfg Config, dbPath string) {
